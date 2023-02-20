@@ -1,0 +1,9 @@
+
+A decoder capable of unzipping gzip and bz2 streams. For choosing
+gzip or bz2 use caps filter, e.g.
+
+     gst-launch-1.0 filesrc location=example.webm.bz2 ! "application/x-bzip2" ! gzdec ! decodebin ! xvimagesink
+
+     gst-launch-1.0 filesrc location=example.webm.gz ! "application/x-gzip" ! gzdec ! decodebin ! xvimagesink
+
+Default mode is gzip.
