@@ -57,19 +57,9 @@
  * </refsect2>
  */
 
-#include "gst/base/gstbasetransform.h"
-#include "gst/gstallocator.h"
-#include "gst/gstbuffer.h"
-#include "gst/gstcaps.h"
-#include "gst/gstcompat.h"
-#include "gst/gstelement.h"
-#include "gst/gstevent.h"
-#include "gst/gstghostpad.h"
-#include "gst/gstinfo.h"
-#include "gst/gstmemory.h"
+#include "gst/gst.h"
 #include "gst/gstpad.h"
-#include "gst/gstquery.h"
-#include "gst/gststructure.h"
+#include "gst/gstutils.h"
 #include <bzlib.h>
 #include <pthread.h>
 #include <string.h>
@@ -97,16 +87,10 @@ static GstStaticPadTemplate src_factory = GST_STATIC_PAD_TEMPLATE ("src",
     GST_STATIC_CAPS ("ANY")
     );
 
-#define gst_gzdec_parent_class parent_class
-G_DEFINE_TYPE (GstGzdec, gst_gzdec, GST_TYPE_ELEMENT);
-
-GST_ELEMENT_REGISTER_DEFINE (gzdec, "gzdec", GST_RANK_NONE,
-    GST_TYPE_GZDEC);
+GST_BOILERPLATE (GstGzdec, gst_gzdec, GstElement, GST_TYPE_ELEMENT);
 
 static GstFlowReturn gst_gzdec_chain (GstPad    *pad,
-    GstObject *parent, GstBuffer *buf);
-static gboolean gst_gzdec_sink_event (GstPad    *pad,
-    GstObject *parent, GstEvent  *event);
+    GstBuffer *buf);
 
 // Private methods
 
@@ -124,11 +108,11 @@ static GstFlowReturn bzlib_encode (GstGzdec * filter,
 
 /* initialize the gzdec's class */
 static void
-gst_gzdec_class_init (GstGzdecClass * klass)
+gst_gzdec_base_init (gpointer g_class)
 {
   GstElementClass *element_class;
 
-  element_class = (GstElementClass *) klass;
+  element_class = (GstElementClass *) g_class;
 
   gst_element_class_set_details_simple (element_class,
       "Gzdec",
@@ -140,6 +124,13 @@ gst_gzdec_class_init (GstGzdecClass * klass)
       gst_static_pad_template_get (&src_factory));
   gst_element_class_add_pad_template (element_class,
       gst_static_pad_template_get (&sink_factory));
+    
+}
+
+static void
+gst_gzdec_class_init (GstGzdecClass * klass)
+{
+  return;
 }
 
 /* initialize the new element
@@ -148,7 +139,7 @@ gst_gzdec_class_init (GstGzdecClass * klass)
  * initialize instance structure
  */
 static void
-gst_gzdec_init (GstGzdec * filter)
+gst_gzdec_init (GstGzdec * filter, GstGzdecClass * klass)
 {
   memset(&filter->zlib_stream, 0, sizeof(filter->zlib_stream));
   memset(&filter->bzlib_stream, 0, sizeof(filter->bzlib_stream));
@@ -156,12 +147,9 @@ gst_gzdec_init (GstGzdec * filter)
   filter->sinkpad = gst_pad_new_from_static_template (&sink_factory, "sink");
   gst_pad_set_chain_function (filter->sinkpad,
       GST_DEBUG_FUNCPTR (gst_gzdec_chain));
-  gst_pad_set_event_function(filter->sinkpad,
-      GST_DEBUG_FUNCPTR (gst_gzdec_sink_event));
   gst_element_add_pad (GST_ELEMENT (filter), filter->sinkpad);
 
   filter->srcpad = gst_pad_new_from_static_template (&src_factory, "src");
-  GST_PAD_SET_PROXY_CAPS (filter->srcpad);
   gst_element_add_pad (GST_ELEMENT (filter), filter->srcpad);
 
   filter->in_progress  = FALSE;
@@ -173,13 +161,31 @@ gst_gzdec_init (GstGzdec * filter)
 
 /* GstBaseTransform vmethod implementations */
 static GstFlowReturn gst_gzdec_chain (GstPad    *pad,
-    GstObject *parent, GstBuffer *buf)
-{
-  GstGzdec * filter = GST_GZDEC (parent);
+    GstBuffer *buf)
+{ 
+  GstGzdec * filter = GST_GZDEC (GST_PAD_PARENT (pad));
   GstFlowReturn ret = GST_FLOW_OK;
   GstBuffer * outbuf;
 
   if (G_UNLIKELY(! filter->in_progress)) {
+    GstCaps *caps;
+    GstStructure *s;
+
+    caps = GST_BUFFER_CAPS(buf);
+    s = gst_caps_get_structure (caps, 0);
+
+    if (gst_structure_has_name (s, "application/x-gzip")) {
+      filter->init_encoder = zlib_init_encoder;
+      filter->free_encoder = zlib_free_encoder;
+      filter->encode       = zlib_encode;
+    } else if (gst_structure_has_name (s, "application/x-bzip2")) {
+      filter->init_encoder = bzlib_init_encoder;
+      filter->free_encoder = bzlib_free_encoder;
+      filter->encode       = bzlib_encode;
+    } else {
+      goto not_supported;
+    }
+    
     if (! filter->init_encoder (filter))
       goto not_supported;
 
@@ -189,11 +195,14 @@ static GstFlowReturn gst_gzdec_chain (GstPad    *pad,
   ret = filter->encode (filter, buf, &outbuf);
   gst_buffer_unref (buf);
 
-  gst_pad_push(filter->srcpad, outbuf);
+  if (GST_IS_BUFFER(outbuf) && GST_BUFFER_SIZE(outbuf) > 0)
+    gst_pad_push(filter->srcpad, outbuf);
 
   if (ret == GST_FLOW_EOS) {
     filter->free_encoder (filter);
     filter->in_progress = FALSE;
+    gst_pad_push_event(filter->srcpad, gst_event_new_eos());
+    ret = GST_FLOW_OK;
   }
   
   return ret;
@@ -201,51 +210,11 @@ static GstFlowReturn gst_gzdec_chain (GstPad    *pad,
  not_supported:
   {
     gst_buffer_unref (buf);
-    GST_WARNING_OBJECT (parent, "could not invoke encoder, input unsupported");
+    GST_WARNING_OBJECT (filter, "could not invoke encoder, input unsupported");
     return GST_FLOW_NOT_NEGOTIATED;
   }
 }
 
-static gboolean gst_gzdec_sink_event (GstPad    *pad,
-    GstObject *parent, GstEvent  *event)
-{
-  gboolean ret;
-  GstGzdec *filter = GST_GZDEC (parent);
-
-  switch (GST_EVENT_TYPE (event)) {
-  case GST_EVENT_CAPS:
-    {
-      GstCaps *caps;
-      GstStructure *s;
-
-      gst_event_parse_caps (event, &caps);
-      s = gst_caps_get_structure (caps, 0);
-      
-      if (gst_structure_has_name (s, "application/x-gzip")) {
-        filter->init_encoder = zlib_init_encoder;
-        filter->free_encoder = zlib_free_encoder;
-        filter->encode       = zlib_encode;
-        ret = TRUE;
-        break;
-      }
-
-      if (gst_structure_has_name (s, "application/x-bzip2")) {
-        filter->init_encoder = bzlib_init_encoder;
-        filter->free_encoder = bzlib_free_encoder;
-        filter->encode       = bzlib_encode;
-        ret = TRUE;
-        break;
-      }
-
-      ret = FALSE;
-      break;
-    }
-  default:
-    ret = gst_pad_event_default (pad, parent, event);
-    break;
-  }
-  return ret;
-}
 /* Private methods implementation */
 
 static gboolean
@@ -280,32 +249,24 @@ zlib_encode (GstGzdec * filter,
     GstBuffer * inbuf, GstBuffer ** outbuf)
 {
   GstFlowReturn ret = GST_FLOW_OK;
-  GstMemory * memory_block;
-  GstMapInfo map_info_in, map_info_out;
   int zlib_status = Z_OK;
-    
-  if (! gst_buffer_map(inbuf, &map_info_in, GST_MAP_READ))
-    return GST_FLOW_ERROR;
 
-  filter->zlib_stream.avail_in = map_info_in.size;
-  filter->zlib_stream.next_in  = map_info_in.data;
+  filter->zlib_stream.avail_in = GST_BUFFER_SIZE(inbuf);
+  filter->zlib_stream.next_in  = GST_BUFFER_DATA(inbuf);
 
   *outbuf = gst_buffer_new();
   if (outbuf == NULL)
     goto no_buffer;
   
   GST_BUFFER_OFFSET (*outbuf) = filter->zlib_stream.total_out;
-  gst_buffer_copy_into(inbuf, *outbuf, GST_BUFFER_COPY_METADATA, 0, -1);
+  gst_buffer_copy_metadata(inbuf, *outbuf, GST_BUFFER_COPY_TIMESTAMPS);
 
   while (filter->zlib_stream.avail_in > 0 && zlib_status != Z_STREAM_END) {
 
-    memory_block = gst_allocator_alloc(NULL, OUT_BUF_SIZE, NULL);
-
-    if (! gst_memory_map(memory_block, &map_info_out, GST_MAP_WRITE))
-      goto map_error;
-
-    filter->zlib_stream.avail_out = map_info_out.size;
-    filter->zlib_stream.next_out  = map_info_out.data;
+    GstBuffer *outmem = gst_buffer_new_and_alloc(OUT_BUF_SIZE);
+    
+    filter->zlib_stream.avail_out = GST_BUFFER_SIZE(outmem);
+    filter->zlib_stream.next_out  = GST_BUFFER_DATA(outmem);
 
     zlib_status = inflate(&filter->zlib_stream, Z_NO_FLUSH);
     switch (zlib_status) {
@@ -318,13 +279,14 @@ zlib_encode (GstGzdec * filter,
       goto decompress_error;
     }
 
-    gst_memory_unmap(memory_block, &map_info_out);
-    gst_memory_resize(memory_block, 0, OUT_BUF_SIZE - filter->zlib_stream.avail_out);
+    gsize size = OUT_BUF_SIZE - filter->zlib_stream.avail_out;
+    if (size > 0) {
+      GstBuffer * cropped = gst_buffer_create_sub(outmem, 0, size);
+      *outbuf = gst_buffer_join(*outbuf, cropped);
+    }
     
-    gst_buffer_append_memory(*outbuf, memory_block);
+    gst_buffer_unref(outmem);
   }
-
-  gst_buffer_unmap(inbuf, &map_info_in);
 
   if (zlib_status == Z_STREAM_END)
     return GST_FLOW_EOS;
@@ -333,22 +295,12 @@ zlib_encode (GstGzdec * filter,
 
  no_buffer:
   {
-    gst_buffer_unmap(inbuf, &map_info_in);
     GST_WARNING_OBJECT (filter, "could not allocate buffer");
-    return ret;
-  }
-
- map_error:
-  {
-    gst_buffer_unmap(inbuf, &map_info_in);
-    GST_WARNING_OBJECT (filter, "could not map memory object");
     return ret;
   }
 
  decompress_error:
   {
-    gst_memory_unmap(memory_block, &map_info_out);
-    gst_buffer_unmap(inbuf, &map_info_in);
     GST_WARNING_OBJECT (filter, "could not decompress stream: ZLIB_ERROR(%d)",
          zlib_status);
     return ret;
@@ -384,32 +336,24 @@ bzlib_encode (GstGzdec * filter,
     GstBuffer * inbuf, GstBuffer ** outbuf)
 {
   GstFlowReturn ret = GST_FLOW_OK;
-  GstMemory * memory_block;
-  GstMapInfo map_info_in, map_info_out;
   int bzlib_status = BZ_OK;
     
-  if (! gst_buffer_map(inbuf, &map_info_in, GST_MAP_READ))
-    return GST_FLOW_ERROR;
-
-  filter->bzlib_stream.avail_in = map_info_in.size;
-  filter->bzlib_stream.next_in  = (char*) map_info_in.data;
+  filter->bzlib_stream.avail_in = GST_BUFFER_SIZE(inbuf);
+  filter->bzlib_stream.next_in  = (char*)GST_BUFFER_DATA(inbuf);
 
   *outbuf = gst_buffer_new();
   if (outbuf == NULL)
     goto no_buffer;
   
   GST_BUFFER_OFFSET (*outbuf) = filter->zlib_stream.total_out;
-  gst_buffer_copy_into(inbuf, *outbuf, GST_BUFFER_COPY_METADATA, 0, -1);
+  gst_buffer_copy_metadata(inbuf, *outbuf, GST_BUFFER_COPY_TIMESTAMPS);
 
   while (filter->bzlib_stream.avail_in > 0 && bzlib_status != BZ_STREAM_END) {
 
-    memory_block = gst_allocator_alloc(NULL, OUT_BUF_SIZE, NULL);
+    GstBuffer *outmem = gst_buffer_new_and_alloc(OUT_BUF_SIZE);
 
-    if (! gst_memory_map(memory_block, &map_info_out, GST_MAP_WRITE))
-      goto map_error;
-
-    filter->bzlib_stream.avail_out = map_info_out.size;
-    filter->bzlib_stream.next_out  = (char*) map_info_out.data;
+    filter->bzlib_stream.avail_out = GST_BUFFER_SIZE(outmem);
+    filter->bzlib_stream.next_out  = (char*)GST_BUFFER_DATA(outmem);
 
     bzlib_status = BZ2_bzDecompress (&filter->bzlib_stream);
     if (bzlib_status != BZ_OK && bzlib_status != BZ_STREAM_END) {
@@ -418,13 +362,14 @@ bzlib_encode (GstGzdec * filter,
       goto decompress_error;
     }
 
-    gst_memory_unmap(memory_block, &map_info_out);
-    gst_memory_resize(memory_block, 0, OUT_BUF_SIZE - filter->bzlib_stream.avail_out);
-    
-    gst_buffer_append_memory(*outbuf, memory_block);
-  }
+    gsize size = OUT_BUF_SIZE - filter->bzlib_stream.avail_out;
+    if (size > 0) {
+      GstBuffer * cropped = gst_buffer_create_sub(outmem, 0, size);
+      *outbuf = gst_buffer_join(*outbuf, cropped);
+    }
 
-  gst_buffer_unmap(inbuf, &map_info_in);
+    gst_buffer_unref(outmem);    
+  }
 
   if (bzlib_status == BZ_STREAM_END)
     return GST_FLOW_EOS;
@@ -433,22 +378,12 @@ bzlib_encode (GstGzdec * filter,
 
  no_buffer:
   {
-    gst_buffer_unmap(inbuf, &map_info_in);
     GST_WARNING_OBJECT (filter, "could not allocate buffer");
-    return ret;
-  }
-
- map_error:
-  {
-    gst_buffer_unmap(inbuf, &map_info_in);
-    GST_WARNING_OBJECT (filter, "could not map memory object");
     return ret;
   }
 
  decompress_error:
   {
-    gst_memory_unmap(memory_block, &map_info_out);
-    gst_buffer_unmap(inbuf, &map_info_in);
     GST_WARNING_OBJECT (filter, "could not decompress stream: BZLIB_ERROR(%d)",
          bzlib_status);
     return ret;
@@ -469,7 +404,7 @@ gzdec_init (GstPlugin * gzdec)
   GST_DEBUG_CATEGORY_INIT (gst_gzdec_debug, "gzdec",
       0, "Template gzdec");
 
-  return GST_ELEMENT_REGISTER (gzdec, gzdec);
+  return gst_element_register (gzdec, "gzdec", GST_RANK_NONE, GST_TYPE_GZDEC);
 }
 
 /* PACKAGE: this is usually set by meson depending on some _INIT macro
@@ -487,7 +422,7 @@ gzdec_init (GstPlugin * gzdec)
  */
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
-    gzdec,
+    "gzdec",
     "gzdec",
     gzdec_init,
     PACKAGE_VERSION, GST_LICENSE, GST_PACKAGE_NAME, GST_PACKAGE_ORIGIN)

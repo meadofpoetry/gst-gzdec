@@ -50,18 +50,25 @@
 #include "gst/gstbuffer.h"
 #include "gst/gstpad.h"
 #include <gst/gst.h>
+#include <gstreamer-1.0/gst/gstelement.h>
 #include <zlib.h>
 #include <bzlib.h>
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_GZDEC (gst_gzdec_get_type())
+#define GST_TYPE_GZDEC            (gst_gzdec_get_type())
+#define GST_GZDEC(obj)            (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_GZDEC,GstGzdec))
+#define GST_GZDEC_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_GZDEC,GstGzdecClass))
+#define GST_IS_GZDEC(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_GZDEC))
+#define GST_IS_GZDEC_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_GZDEC))
 
-G_DECLARE_FINAL_TYPE (GstGzdec, gst_gzdec,
-    GST, GZDEC, GstElement)
+typedef struct _GstGzdec GstGzdec;
+typedef struct _GstGzdecClass GstGzdecClass;
 
 #define OUT_BUF_SIZE 4096
-  
+
+#define GST_FLOW_EOS GST_FLOW_CUSTOM_SUCCESS
+
 struct _GstGzdec
 {
   GstElement  element;
@@ -79,6 +86,12 @@ struct _GstGzdec
   gboolean(* free_encoder)(GstGzdec *);
   GstFlowReturn(* encode)(GstGzdec *, GstBuffer *, GstBuffer **);
 };
+
+struct _GstGzdecClass {
+  GstElementClass parent;
+};
+
+GType gst_gzdec_get_type (void) G_GNUC_CONST;
 
 G_END_DECLS
 

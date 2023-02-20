@@ -14,10 +14,10 @@ zlib_dep = dependency('zlib', version : '>=1.2',
 bzip_dep = dependency('bzip2', version : '>=1.0',
   required : true)
 
-gst_dep = dependency('gstreamer-1.0', version : '>=1.19',
+gst_dep = dependency('gstreamer-0.10', version : ['>=0.10.', '<1.0'],
   required : true)
 
-plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-1.0')
+plugins_install_dir = join_paths(get_option('libdir'), 'gstreamer-0.10')
 
 plugin_c_args = ['-DHAVE_CONFIG_H']
 cdata = configuration_data()
